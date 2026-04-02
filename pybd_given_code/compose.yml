@@ -14,10 +14,11 @@ services:
     volumes:
       - /tmp/bourse/timescaledb:/var/lib/postgresql/data/timescaledb
     healthcheck:
-      test: [ "CMD-SHELL", "pg_isready -U bourse bourse" ]
-      interval: 10s
+      test: [ "CMD-SHELL", "pg_isready -U bourse -d bourse" ]
+      interval: 5s
       timeout: 5s
-      retries: 5
+      retries: 10
+      start_period: 30s
 
   dashboard:
     build:
@@ -25,13 +26,18 @@ services:
       dockerfile: Dockerfile
     container_name: bourse-dashboard
     depends_on:
-      - database
+      database:
+        condition: service_healthy
     networks: [ boursenet ]
     ports:
       - "8050:8050"
+    environment:
+      - DB_HOST=database
+      - DATADIR=/mnt/data
     restart: unless-stopped
     volumes:
-      - /home/baptou/project/EC/teaching/pybd/data:/mnt/data
+      - ./euronext:/mnt/data/euronext
+      - ./bourso:/mnt/data/boursorama
 
 networks:
   boursenet:
