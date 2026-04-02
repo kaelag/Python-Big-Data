@@ -1,7 +1,9 @@
 import os
+import threading
 import dash
 import dash_bootstrap_components as dbc
-from dash import html, dcc, dash_table, Input, Output
+import json
+from dash import html, dcc, dash_table, Input, Output, State, ALL
 import plotly.graph_objects as go
 import pandas as pd
 from loguru import logger
@@ -16,11 +18,13 @@ app = dash.Dash(
     __name__,
     title="Bourse Dashboard",
     suppress_callback_exceptions=True,
-    external_stylesheets=[dbc.themes.BOOTSTRAP],
+    external_stylesheets=[dbc.themes.FLATLY],
 )
 
+bourso_status = {"total": 0, "done": 0, "finished": False}
 
-def get_company_options():
+
+def get_options():
     df = db.df_query("""
         SELECT DISTINCT c.id, c.name FROM companies c
         JOIN daystocks d ON d.cid = c.id
@@ -30,20 +34,36 @@ def get_company_options():
 
 
 def build_layout():
-    options = get_company_options()
+    options = get_options()
     return dbc.Container([
-        html.H2("Bourse Dashboard", className="mt-3 mb-4"),
 
         dbc.Row([
             dbc.Col([
-                html.Label("Actions"),
-                dcc.Dropdown(
-                    id="stock-select", options=options,
-                    multi=True, placeholder="Choisir des actions...",
-                ),
-            ], md=5),
+                html.H4("Bourse Dashboard", className="fw-bold mb-0 text-primary"),
+                html.Small("Données Euronext + Boursorama", className="text-muted"),
+            ], className="py-3"),
+        ], className="border-bottom mb-3"),
+
+        html.Div(id="loading-section", children=[
+            html.Small(id="bourso-status", className="text-muted d-block mb-1"),
+            dbc.Progress(
+                id="bourso-progress", value=0, striped=True, animated=True,
+                color="primary", style={"height": "5px"},
+            ),
+        ], className="mb-4"),
+
+        dbc.Row([
             dbc.Col([
-                html.Label("Periode"),
+                html.Label("Actions", className="small fw-semibold text-uppercase text-muted mb-1"),
+                dcc.Dropdown(
+                    id="stock-select", options=options, multi=True,
+                    placeholder="Rechercher des actions...",
+                    className="stock-search",
+                ),
+                html.Div(id="selected-tags", className="mt-2 d-flex flex-wrap gap-1"),
+            ], md=6),
+            dbc.Col([
+                html.Label("Période", className="small fw-semibold text-uppercase text-muted mb-1"),
                 dcc.DatePickerRange(
                     id="date-range",
                     start_date="2020-05-01",
@@ -52,7 +72,7 @@ def build_layout():
                 ),
             ], md=4),
             dbc.Col([
-                html.Label("Type"),
+                html.Label("Affichage", className="small fw-semibold text-uppercase text-muted mb-1"),
                 dcc.RadioItems(
                     id="chart-type",
                     options=[
@@ -60,40 +80,138 @@ def build_layout():
                         {"label": " Chandeliers", "value": "candle"},
                     ],
                     value="line", inline=True,
+                    inputStyle={"marginRight": "4px", "marginLeft": "10px"},
                 ),
-            ], md=3),
-        ], className="mb-4"),
+            ], md=2, className="d-flex flex-column justify-content-end"),
+        ], className="mb-4 g-3"),
 
         dbc.Tabs([
             dbc.Tab(label="Cours", tab_id="tab-cours", children=[
-                dcc.Graph(id="price-chart", style={"height": "75vh"}),
+                dcc.Graph(id="price-chart", style={"height": "70vh"}),
             ]),
             dbc.Tab(label="Bollinger", tab_id="tab-bollinger", children=[
                 dbc.Row([
                     dbc.Col([
-                        html.Label("Action pour Bollinger", className="mt-3"),
+                        html.Label("Action", className="small fw-semibold text-uppercase text-muted mt-3 mb-1"),
                         dcc.Dropdown(id="bollinger-stock", placeholder="Choisir une action..."),
                     ], md=4),
                 ], className="mb-2"),
-                dcc.Graph(id="bollinger-chart", style={"height": "70vh"}),
+                dcc.Graph(id="bollinger-chart", style={"height": "65vh"}),
             ]),
-            dbc.Tab(label="Donnees brutes", tab_id="tab-table", children=[
-                html.Div([
-                    dash_table.DataTable(
-                        id="data-table",
-                        page_size=25,
-                        style_table={"overflowX": "auto", "marginTop": "15px"},
-                        style_cell={"textAlign": "center", "padding": "8px", "fontSize": "14px"},
-                        style_header={"fontWeight": "bold", "backgroundColor": "#f8f9fa"},
-                    ),
-                ]),
+            dbc.Tab(label="Données brutes", tab_id="tab-table", children=[
+                dash_table.DataTable(
+                    id="data-table",
+                    page_size=25,
+                    style_table={"overflowX": "auto", "marginTop": "15px"},
+                    style_cell={
+                        "textAlign": "center", "padding": "10px",
+                        "fontSize": "13px", "fontFamily": "inherit",
+                        "border": "1px solid #dee2e6",
+                    },
+                    style_header={
+                        "fontWeight": "600", "backgroundColor": "#f8f9fa",
+                        "borderBottom": "2px solid #dee2e6", "fontSize": "13px",
+                    },
+                    style_data_conditional=[
+                        {"if": {"row_index": "odd"}, "backgroundColor": "#fbfcfd"},
+                    ],
+                ),
             ]),
-            dbc.Tab(label="Performance (base 100)", tab_id="tab-perf", children=[
-                dcc.Graph(id="perf-chart", style={"height": "75vh"}),
+
+            dbc.Tab(label="Corrélation", tab_id="tab-corr", children=[
+                dcc.Graph(id="corr-chart", style={"height": "70vh"}),
+            ]),
+            dbc.Tab(label="Statistiques", tab_id="tab-stats", children=[
+                dash_table.DataTable(
+                    id="stats-table",
+                    page_size=25,
+                    style_table={"overflowX": "auto", "marginTop": "15px"},
+                    style_cell={
+                        "textAlign": "center", "padding": "10px",
+                        "fontSize": "13px", "fontFamily": "inherit",
+                        "border": "1px solid #dee2e6",
+                    },
+                    style_header={
+                        "fontWeight": "600", "backgroundColor": "#f8f9fa",
+                        "borderBottom": "2px solid #dee2e6", "fontSize": "13px",
+                    },
+                    style_data_conditional=[
+                        {"if": {"row_index": "odd"}, "backgroundColor": "#fbfcfd"},
+                        {"if": {"filter_query": "{Rendement (%)} < 0", "column_id": "Rendement (%)"},
+                         "color": "#e63757"},
+                        {"if": {"filter_query": "{Rendement (%)} >= 0", "column_id": "Rendement (%)"},
+                         "color": "#00d97e"},
+                        {"if": {"filter_query": "{Drawdown max (%)} < 0", "column_id": "Drawdown max (%)"},
+                         "color": "#e63757"},
+                    ],
+                ),
+            ]),
+            dbc.Tab(label="Rendements", tab_id="tab-returns", children=[
+                dcc.Graph(id="returns-chart", style={"height": "70vh"}),
             ]),
         ], id="tabs", active_tab="tab-cours", className="mb-3"),
 
-    ], fluid=True)
+        dcc.Interval(id="refresh-interval", interval=2000, n_intervals=0),
+
+    ], fluid=True, className="px-4")
+
+
+@app.callback(
+    Output("stock-select", "options"),
+    Output("bourso-status", "children"),
+    Output("bourso-progress", "value"),
+    Output("loading-section", "style"),
+    Input("refresh-interval", "n_intervals"),
+)
+def refresh_ui(_):
+    options = get_options()
+
+    if bourso_status["finished"]:
+        total = bourso_status["total"]
+        status = f"Boursorama chargé — {total:,} fichiers (100%)" if total > 0 else "Boursorama chargé"
+        return options, status, 100, {"display": "none"}
+    elif bourso_status["total"] > 0:
+        pct = int(bourso_status["done"] / bourso_status["total"] * 100)
+        status = f"Chargement Boursorama : {bourso_status['done']:,} / {bourso_status['total']:,} ({pct}%)"
+        return options, status, pct, {}
+    else:
+        return options, "Chargement Boursorama...", 0, {}
+
+
+@app.callback(
+    Output("selected-tags", "children"),
+    Input("stock-select", "value"),
+    State("stock-select", "options"),
+)
+def render_tags(stock_ids, options):
+    if not stock_ids:
+        return []
+    opt_map = {o["value"]: o["label"] for o in (options or [])}
+    return [
+        dbc.Badge(
+            [opt_map.get(sid, str(sid)), html.Span(" ×", className="ms-1")],
+            id={"type": "remove-stock", "index": sid},
+            color="primary", n_clicks=0,
+            style={"cursor": "pointer", "fontSize": "12px", "padding": "5px 10px"},
+        )
+        for sid in stock_ids
+    ]
+
+
+@app.callback(
+    Output("stock-select", "value"),
+    Input({"type": "remove-stock", "index": ALL}, "n_clicks"),
+    State("stock-select", "value"),
+    prevent_initial_call=True,
+)
+def remove_stock(n_clicks_list, current_ids):
+    ctx = dash.callback_context
+    if not ctx.triggered or not current_ids:
+        raise dash.exceptions.PreventUpdate
+    if not ctx.triggered[0]["value"]:
+        raise dash.exceptions.PreventUpdate
+    stock_id = json.loads(ctx.triggered[0]["prop_id"].rsplit(".", 1)[0])["index"]
+    return [sid for sid in current_ids if sid != stock_id]
 
 
 def query_daystocks(stock_ids, start, end):
@@ -144,7 +262,7 @@ def update_price_chart(stock_ids, start, end, chart_type):
         fig.update_yaxes(type="log")
 
     fig.update_layout(
-        title="Cours des actions" + (" (echelle log)" if chart_type == "line" else ""),
+        title="Cours des actions" + (" (échelle log)" if chart_type == "line" else ""),
         xaxis_title="Date", yaxis_title="Prix",
         xaxis_rangeslider_visible=False,
         xaxis_rangebreaks=[dict(bounds=["sat", "mon"])],
@@ -213,11 +331,11 @@ def update_bollinger(stock_id, start, end, chart_type):
     else:
         fig.add_trace(go.Scatter(
             x=df["date"], y=df["close"], name=name,
-            line=dict(color="blue"),
+            line=dict(color="#2c7be5"),
         ))
 
     fig.update_layout(
-        title=f"Bandes de Bollinger - {name}",
+        title=f"Bandes de Bollinger — {name}",
         dragmode="pan",
         xaxis_rangeslider_visible=False,
         xaxis_rangebreaks=[dict(bounds=["sat", "mon"])],
@@ -242,62 +360,133 @@ def update_table(stock_ids, start, end):
     table = df.rename(columns={
         "date": "Date", "name": "Action",
         "low": "Min", "high": "Max",
-        "open": "Debut", "close": "Fin",
-        "mean": "Moyenne", "std": "Ecart-type",
-    })[["Date", "Action", "Min", "Max", "Debut", "Fin", "Moyenne", "Ecart-type"]]
+        "open": "Début", "close": "Fin",
+        "mean": "Moyenne", "std": "Écart-type",
+    })[["Date", "Action", "Min", "Max", "Début", "Fin", "Moyenne", "Écart-type"]]
 
-    for col in ("Min", "Max", "Debut", "Fin", "Moyenne", "Ecart-type"):
+    for col in ("Min", "Max", "Début", "Fin", "Moyenne", "Écart-type"):
         table[col] = table[col].round(2)
 
     columns = [{"name": c, "id": c} for c in table.columns]
     return table.to_dict("records"), columns
 
 
+
 @app.callback(
-    Output("perf-chart", "figure"),
+    Output("corr-chart", "figure"),
     Input("stock-select", "value"),
     Input("date-range", "start_date"),
     Input("date-range", "end_date"),
 )
-def update_perf(stock_ids, start, end):
+def update_corr(stock_ids, start, end):
+    df = query_daystocks(stock_ids, start, end)
+    if df.empty or len(df["name"].unique()) < 2:
+        return go.Figure()
+
+    pivot = df.pivot_table(index="date", columns="name", values="close")
+    corr = pivot.corr().round(2)
+    fig = go.Figure(go.Heatmap(
+        z=corr.values,
+        x=corr.columns.tolist(),
+        y=corr.index.tolist(),
+        colorscale="RdBu",
+        zmin=-1, zmax=1,
+        text=corr.values,
+        texttemplate="%{text:.2f}",
+        colorbar=dict(title="Corrélation"),
+    ))
+    fig.update_layout(
+        title="Matrice de corrélation des rendements",
+        margin=dict(l=50, r=30, t=50, b=40),
+    )
+    return fig
+
+
+@app.callback(
+    Output("stats-table", "data"),
+    Output("stats-table", "columns"),
+    Input("stock-select", "value"),
+    Input("date-range", "start_date"),
+    Input("date-range", "end_date"),
+)
+def update_stats(stock_ids, start, end):
+    df = query_daystocks(stock_ids, start, end)
+    if df.empty:
+        return [], []
+
+    rows = []
+    for name, grp in df.groupby("name"):
+        grp = grp.sort_values("date")
+        returns = grp["close"].pct_change().dropna()
+        if returns.empty:
+            continue
+        total_return = (grp["close"].iloc[-1] / grp["close"].iloc[0] - 1) * 100
+        vol = returns.std() * (252 ** 0.5) * 100
+        cummax = grp["close"].cummax()
+        drawdown = ((grp["close"] - cummax) / cummax).min() * 100
+        rows.append({
+            "Action": name,
+            "Rendement (%)": round(total_return, 2),
+            "Volatilité annualisée (%)": round(vol, 2),
+            "Drawdown max (%)": round(drawdown, 2),
+            "Meilleur jour (%)": round(returns.max() * 100, 2),
+            "Pire jour (%)": round(returns.min() * 100, 2),
+        })
+
+    if not rows:
+        return [], []
+    columns = [{"name": c, "id": c} for c in rows[0].keys()]
+    return rows, columns
+
+
+@app.callback(
+    Output("returns-chart", "figure"),
+    Input("stock-select", "value"),
+    Input("date-range", "start_date"),
+    Input("date-range", "end_date"),
+)
+def update_returns(stock_ids, start, end):
     df = query_daystocks(stock_ids, start, end)
     if df.empty:
         return go.Figure()
 
     fig = go.Figure()
     for name, grp in df.groupby("name"):
-        grp = grp.sort_values("date")
-        base = grp["close"].iloc[0]
-        if base and base > 0:
-            fig.add_trace(go.Scatter(
-                x=grp["date"],
-                y=(grp["close"] / base) * 100,
-                mode="lines", name=name,
-            ))
+        returns = grp.sort_values("date")["close"].pct_change().dropna() * 100
+        fig.add_trace(go.Histogram(
+            x=returns, name=name, opacity=0.7, nbinsx=60,
+        ))
 
-    fig.add_hline(y=100, line_dash="dash", line_color="gray")
     fig.update_layout(
-        title="Performance comparee (base 100)",
-        xaxis_title="Date", yaxis_title="Performance",
+        barmode="overlay",
+        title="Distribution des rendements journaliers (%)",
+        xaxis_title="Rendement journalier (%)",
+        yaxis_title="Fréquence",
         dragmode="pan",
         margin=dict(l=50, r=30, t=50, b=40),
     )
     return fig
 
 
+def _load_bourso_background():
+    store_files("2019-01-01", "2023-12-31", "bourso", db, status=bourso_status)
+
+
 if __name__ == "__main__":
     import logging, warnings
 
-    logger.info("Chargement des donnees euronext...")
+    logger.info("Chargement des données Euronext...")
     store_files("2020-05-01", "2024-12-31", "euronext", db)
 
     app.layout = build_layout()
 
-    logger.info("Dashboard pret sur http://0.0.0.0:8050/")
+    logger.info("Dashboard prêt sur http://0.0.0.0:8050/")
 
     warnings.filterwarnings("ignore")
     logger.remove()
     logging.getLogger("sqlalchemy").setLevel(logging.ERROR)
     logging.getLogger("werkzeug").setLevel(logging.ERROR)
+
+    threading.Thread(target=_load_bourso_background, daemon=True).start()
 
     app.run(host="0.0.0.0", debug=False, port=8050)

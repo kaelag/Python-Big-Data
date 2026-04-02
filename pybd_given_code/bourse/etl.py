@@ -278,36 +278,117 @@ def _store_euronext(start, end, db):
     logger.info("Import euronext termine")
 
 
+def _read_one_bourso(args):
+    dt, path = args
+    try:
+        import bz2, pickle
+        with bz2.open(path, "rb") as f:
+            raw = pickle.load(f)
+    except Exception:
+        return None, None
+
+    prices = pd.to_numeric(
+        raw["last"].astype(str)
+        .str.replace(" ", "", regex=False)
+        .str.replace(",", "", regex=False)
+        .str.replace("(c)", "", regex=False),
+        errors="coerce",
+    )
+    mask = prices.notna()
+    if not mask.any():
+        return None, None
+
+    return (
+        dt.strftime("%Y-%m-%d"),
+        raw.loc[mask, "name"].values,
+        prices[mask].values.astype(np.float32),
+        pd.to_numeric(raw.loc[mask, "volume"], errors="coerce").fillna(0).values.astype(np.float32),
+    ), os.path.basename(path)
+
+
 def _store_bourso(start, end, db, status=None):
-    done_df = db.df_query("SELECT name FROM file_done WHERE name LIKE 'bourso_stock_%'")
-    done_stocks = {r["name"].replace("bourso_stock_", "") for _, r in done_df.iterrows()}
+    files = _list_bourso_files(start, end)
+    done = set(db.df_query("SELECT name FROM file_done")["name"])
+    cid_map = _get_or_refresh_cid_map(db)
 
-    all_companies = db.df_query("SELECT id, name FROM companies")
-    all_map = dict(zip(all_companies["name"], all_companies["id"]))
+    todo = [(dt, p) for dt, p in files if os.path.basename(p) not in done]
+    if not todo:
+        if status is not None:
+            status["finished"] = True
+        return
 
-    euronext_cids = set()
-    ex = db.df_query("SELECT DISTINCT cid FROM daystocks")
-    if len(ex):
-        euronext_cids = set(ex["cid"])
-
-    bourso_only = [n for n in all_map if all_map[n] not in euronext_cids and n not in done_stocks]
-    shared = [n for n in all_map if all_map[n] in euronext_cids and n not in done_stocks]
-
-    todo = bourso_only + shared
-
+    total = len(todo)
     if status is not None:
-        status["total"] = len(todo)
+        status["total"] = total
         status["done"] = 0
 
-    for i, name in enumerate(todo):
-        load_stock_priority(name, start, end, db)
-        db.raw_query(
-            "INSERT INTO file_done (name) VALUES (%s) ON CONFLICT DO NOTHING",
-            (f"bourso_stock_{name}",),
-        )
+    workers = os.cpu_count() or 4
+    BATCH = 30000
+    processed = 0
+
+    for i in range(0, total, BATCH):
+        batch = todo[i:i + BATCH]
+
+        days, names, prices, volumes, fnames = [], [], [], [], []
+
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            for idx, (result, fname) in enumerate(pool.map(_read_one_bourso, batch)):
+                if result is not None:
+                    day, n, p, v = result
+                    k = len(n)
+                    days.extend([day] * k)
+                    names.extend(n)
+                    prices.extend(p)
+                    volumes.extend(v)
+                    fnames.append(fname)
+                if status is not None:
+                    status["done"] = processed + idx + 1
+
+        if not fnames:
+            processed += len(batch)
+            if status is not None:
+                status["done"] = processed
+            continue
+
+        big = pd.DataFrame({"day": days, "name": names, "last": prices, "volume": volumes})
+        del days, names, prices, volumes
+
+        agg = big.groupby(["day", "name"]).agg(
+            open=("last", "first"),
+            close=("last", "last"),
+            high=("last", "max"),
+            low=("last", "min"),
+            volume=("volume", "max"),
+        ).reset_index()
+        del big
+
+        agg.rename(columns={"day": "date"}, inplace=True)
+
+        new_names = set(agg["name"]) - set(cid_map.keys())
+        if new_names:
+            cid_map = _get_or_refresh_cid_map(db, new_names)
+
+        agg["cid"] = agg["name"].map(cid_map)
+        agg = agg.dropna(subset=["cid"])
+
+        ohlc = agg[["open", "high", "low", "close"]]
+        agg["mean"] = ohlc.mean(axis=1).astype("float32")
+        agg["std"] = ohlc.std(axis=1).astype("float32")
+
+        result = agg[["date", "cid", "open", "close", "high", "low", "volume", "mean", "std"]].copy()
+        result["cid"] = result["cid"].astype("Int16")
+        for col in ("open", "close", "high", "low", "volume"):
+            result[col] = result[col].astype("float32")
+
+        db.df_write(result, "daystocks", chunksize=10000)
+        for fname in fnames:
+            db.raw_query(
+                "INSERT INTO file_done (name) VALUES (%s) ON CONFLICT DO NOTHING",
+                (fname,),
+            )
         db.commit()
-        if status is not None:
-            status["done"] = i + 1
+
+        processed += len(batch)
 
     if status is not None:
         status["finished"] = True

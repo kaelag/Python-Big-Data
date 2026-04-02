@@ -1,0 +1,4 @@
+.stock-search .Select-value,
+.stock-search [class$="-multiValue"] {
+    display: none !important;
+}
