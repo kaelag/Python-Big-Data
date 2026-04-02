@@ -14,5 +14,3 @@ bourso/
 # Logs et fichiers de travail
 .work/
 
-# uv lock (regenerable)
-uv.lock
