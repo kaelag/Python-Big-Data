@@ -21,7 +21,11 @@ app = dash.Dash(
 
 
 def get_company_options():
-    df = db.df_query("SELECT id, name FROM companies ORDER BY name")
+    df = db.df_query("""
+        SELECT DISTINCT c.id, c.name FROM companies c
+        JOIN daystocks d ON d.cid = c.id
+        ORDER BY c.name
+    """)
     return [{"label": r["name"], "value": r["id"]} for _, r in df.iterrows()]
 
 
@@ -282,11 +286,18 @@ def update_perf(stock_ids, start, end):
 
 
 if __name__ == "__main__":
+    import logging, warnings
+
     logger.info("Chargement des donnees euronext...")
     store_files("2020-05-01", "2024-12-31", "euronext", db)
-    logger.info("Donnees chargees")
 
     app.layout = build_layout()
 
-    logger.info("Demarrage du serveur sur :8050")
-    app.run(host="0.0.0.0", debug=True, port=8050)
+    logger.info("Dashboard pret sur http://0.0.0.0:8050/")
+
+    warnings.filterwarnings("ignore")
+    logger.remove()
+    logging.getLogger("sqlalchemy").setLevel(logging.ERROR)
+    logging.getLogger("werkzeug").setLevel(logging.ERROR)
+
+    app.run(host="0.0.0.0", debug=False, port=8050)
