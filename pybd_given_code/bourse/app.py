@@ -8,7 +8,10 @@ import dash
 import dash_bootstrap_components as dbc
 import pandas as pd
 import plotly.graph_objects as go
+from loguru import logger
 from dash import ALL, Input, Output, State, dash_table, dcc, html
+
+logger.remove()
 
 import timescaledb_model as tsdb
 from etl import store_files
@@ -41,7 +44,7 @@ def get_options():
 
 
 def get_stocks(stock_ids, start, end):
-    if not stock_ids:
+    if not stock_ids or None in stock_ids:
         return pd.DataFrame()
     if not start or not end:
         return pd.DataFrame()
@@ -174,7 +177,7 @@ def refresh_ui(_):
             msg = f"Boursorama chargé — {total:,} fichiers (100%)"
         else:
             msg = "Boursorama chargé"
-        return opts, msg, 100, {"display": "none"}
+        return opts, msg, 100, {}
 
     elif bourso_status["total"] > 0:
         done = bourso_status["done"]

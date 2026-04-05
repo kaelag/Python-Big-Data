@@ -5,8 +5,6 @@ import pandas as pd
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
 
-import timescaledb_model as tsdb
-
 DATADIR = os.environ.get("DATADIR", "/mnt/data/")
 EURONEXT = os.path.join(DATADIR, "euronext")
 BOURSO = os.path.join(DATADIR, "boursorama")
@@ -194,8 +192,12 @@ def store_bourso(start, end, db, status=None):
         if fname not in done:
             todo.append((dt, p))
 
+    total_files = len(files)
+
     if not todo:
         if status:
+            status["total"] = total_files
+            status["done"] = total_files
             status["finished"] = True
         return
 
