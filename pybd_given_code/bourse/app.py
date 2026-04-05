@@ -1,15 +1,13 @@
 import os
-import json
 import threading
 import warnings
 import logging
-
 import dash
 import dash_bootstrap_components as dbc
 import pandas as pd
 import plotly.graph_objects as go
 from loguru import logger
-from dash import ALL, Input, Output, State, dash_table, dcc, html
+from dash import Input, Output, dash_table, dcc, html
 
 logger.remove()
 
@@ -19,12 +17,7 @@ from etl import store_files
 DB_HOST = os.environ.get("DB_HOST", "database")
 db = tsdb.TimescaleStockMarketModel("bourse", "bourse", DB_HOST, "password")
 
-app = dash.Dash(
-    __name__,
-    title="Bourse Dashboard",
-    suppress_callback_exceptions=True,
-    external_stylesheets=[dbc.themes.FLATLY],
-)
+app = dash.Dash(__name__, external_stylesheets=[dbc.themes.FLATLY])
 
 bourso_status = {"total": 0, "done": 0, "finished": False}
 
@@ -52,16 +45,15 @@ def get_stocks(stock_ids, start, end):
     for i in stock_ids:
         id_list.append(str(i))
     ids = ",".join(id_list)
-    return db.df_query(f"""
-        SELECT DISTINCT ON (d.date, d.cid)
-               d.date, d.open, d.close, d.high, d.low,
-               d.volume, d.mean, d.std, c.name
+    query = f"""SELECT DISTINCT ON (d.date, d.cid)
+        d.date, d.open, d.close, d.high, d.low,
+        d.volume, d.mean, d.std, c.name
         FROM daystocks d
         JOIN companies c ON d.cid = c.id
         WHERE d.cid IN ({ids})
-          AND d.date BETWEEN '{start}' AND '{end}'
-        ORDER BY d.date, d.cid, d.volume DESC
-    """)
+        AND d.date BETWEEN '{start}' AND '{end}'
+        ORDER BY d.date, d.cid, d.volume DESC"""
+    return db.df_query(query)
 
 
 def build_layout():
@@ -77,29 +69,23 @@ def build_layout():
 
         html.Div(id="loading-section", children=[
             html.Small(id="bourso-status", className="text-muted d-block mb-1"),
-            dbc.Progress(id="bourso-progress", value=0, striped=True, animated=True,
-                         color="primary", style={"height": "5px"}),
+            dbc.Progress(id="bourso-progress", value=0, striped=True, animated=True, color="primary", style={"height": "5px"}),
         ], className="mb-4"),
 
         dbc.Row([
             dbc.Col([
                 html.Label("Actions", className="small fw-semibold text-uppercase text-muted mb-1"),
-                dcc.Dropdown(id="stock-select", options=opts, multi=True,
-                             placeholder="Rechercher des actions...", className="stock-search"),
-                html.Div(id="selected-tags", className="mt-2 d-flex flex-wrap gap-1"),
+                dcc.Dropdown(id="stock-select", options=opts, multi=True, placeholder="Rechercher des actions..."),
             ], md=6),
             dbc.Col([
                 html.Label("Période", className="small fw-semibold text-uppercase text-muted mb-1"),
-                dcc.DatePickerRange(id="date-range", start_date="2020-05-01",
-                                    end_date="2020-12-31", display_format="YYYY-MM-DD"),
+                dcc.DatePickerRange(id="date-range", start_date="2020-05-01", end_date="2020-12-31", display_format="YYYY-MM-DD"),
             ], md=4),
             dbc.Col([
                 html.Label("Affichage", className="small fw-semibold text-uppercase text-muted mb-1"),
                 dcc.RadioItems(id="chart-type",
-                               options=[{"label": " Ligne", "value": "line"},
-                                        {"label": " Chandeliers", "value": "candle"}],
-                               value="line", inline=True,
-                               inputStyle={"marginRight": "4px", "marginLeft": "10px"}),
+                    options=[{"label": " Ligne", "value": "line"}, {"label": " Chandeliers", "value": "candle"}],
+                    value="line", inline=True, inputStyle={"marginRight": "4px", "marginLeft": "10px"}),
             ], md=2, className="d-flex flex-column justify-content-end"),
         ], className="mb-4 g-3"),
 
@@ -108,23 +94,13 @@ def build_layout():
                 dcc.Graph(id="price-chart", style={"height": "70vh"}),
             ]),
             dbc.Tab(label="Bollinger", tab_id="tab-bollinger", children=[
-                dbc.Row([
-                    dbc.Col([
-                        html.Label("Action", className="small fw-semibold text-uppercase text-muted mt-3 mb-1"),
-                        dcc.Dropdown(id="bollinger-stock", placeholder="Choisir une action..."),
-                    ], md=4),
-                ], className="mb-2"),
-                dcc.Graph(id="bollinger-chart", style={"height": "65vh"}),
+                dcc.Graph(id="bollinger-chart", style={"height": "70vh"}),
             ]),
             dbc.Tab(label="Données brutes", tab_id="tab-table", children=[
-                dash_table.DataTable(
-                    id="data-table", page_size=25,
+                dash_table.DataTable(id="data-table", page_size=25,
                     style_table={"overflowX": "auto", "marginTop": "15px"},
-                    style_cell={"textAlign": "center", "padding": "10px",
-                                "fontSize": "13px", "fontFamily": "inherit",
-                                "border": "1px solid #dee2e6"},
-                    style_header={"fontWeight": "600", "backgroundColor": "#f8f9fa",
-                                  "borderBottom": "2px solid #dee2e6", "fontSize": "13px"},
+                    style_cell={"textAlign": "center", "padding": "10px", "fontSize": "13px", "fontFamily": "inherit", "border": "1px solid #dee2e6"},
+                    style_header={"fontWeight": "600", "backgroundColor": "#f8f9fa", "borderBottom": "2px solid #dee2e6", "fontSize": "13px"},
                     style_data_conditional=[{"if": {"row_index": "odd"}, "backgroundColor": "#fbfcfd"}],
                 ),
             ]),
@@ -132,23 +108,11 @@ def build_layout():
                 dcc.Graph(id="corr-chart", style={"height": "70vh"}),
             ]),
             dbc.Tab(label="Statistiques", tab_id="tab-stats", children=[
-                dash_table.DataTable(
-                    id="stats-table", page_size=25,
+                dash_table.DataTable(id="stats-table", page_size=25,
                     style_table={"overflowX": "auto", "marginTop": "15px"},
-                    style_cell={"textAlign": "center", "padding": "10px",
-                                "fontSize": "13px", "fontFamily": "inherit",
-                                "border": "1px solid #dee2e6"},
-                    style_header={"fontWeight": "600", "backgroundColor": "#f8f9fa",
-                                  "borderBottom": "2px solid #dee2e6", "fontSize": "13px"},
-                    style_data_conditional=[
-                        {"if": {"row_index": "odd"}, "backgroundColor": "#fbfcfd"},
-                        {"if": {"filter_query": "{Rendement (%)} < 0", "column_id": "Rendement (%)"},
-                         "color": "#e63757"},
-                        {"if": {"filter_query": "{Rendement (%)} >= 0", "column_id": "Rendement (%)"},
-                         "color": "#00d97e"},
-                        {"if": {"filter_query": "{Drawdown max (%)} < 0", "column_id": "Drawdown max (%)"},
-                         "color": "#e63757"},
-                    ],
+                    style_cell={"textAlign": "center", "padding": "10px", "fontSize": "13px", "fontFamily": "inherit", "border": "1px solid #dee2e6"},
+                    style_header={"fontWeight": "600", "backgroundColor": "#f8f9fa", "borderBottom": "2px solid #dee2e6", "fontSize": "13px"},
+                    style_data_conditional=[{"if": {"row_index": "odd"}, "backgroundColor": "#fbfcfd"}],
                 ),
             ]),
             dbc.Tab(label="Rendements", tab_id="tab-returns", children=[
@@ -190,70 +154,6 @@ def refresh_ui(_):
 
 
 @app.callback(
-    Output("selected-tags", "children"),
-    Input("stock-select", "value"),
-    Input("chart-type", "value"),
-    Input("tabs", "active_tab"),
-    State("stock-select", "options"),
-)
-def show_tags(ids, mode, active_tab, opts):
-    if not ids:
-        return []
-
-    labels = {}
-    if opts is None:
-        opts = []
-    for o in opts:
-        val = o["value"]
-        lab = o["label"]
-        labels[val] = lab
-
-    single_only = (mode == "candle" or active_tab == "tab-bollinger")
-
-    tags = []
-    for idx, i in enumerate(ids):
-        name = labels.get(i, str(i))
-        if single_only and idx > 0:
-            color = "secondary"
-        else:
-            color = "primary"
-        badge = dbc.Badge(
-            [name, html.Span(" ×", className="ms-1")],
-            id={"type": "remove-stock", "index": i},
-            color=color, n_clicks=0,
-            style={"cursor": "pointer", "fontSize": "12px", "padding": "5px 10px"},
-        )
-        tags.append(badge)
-    return tags
-
-
-@app.callback(
-    Output("stock-select", "value"),
-    Input({"type": "remove-stock", "index": ALL}, "n_clicks"),
-    State("stock-select", "value"),
-    prevent_initial_call=True,
-)
-def remove_stock(_, ids):
-    ctx = dash.callback_context
-    if not ctx.triggered:
-        raise dash.exceptions.PreventUpdate
-    if not ids:
-        raise dash.exceptions.PreventUpdate
-    if not ctx.triggered[0]["value"]:
-        raise dash.exceptions.PreventUpdate
-
-    triggered = ctx.triggered[0]["prop_id"]
-    prop_id = triggered.rsplit(".", 1)[0]
-    removed = json.loads(prop_id)["index"]
-
-    result = []
-    for i in ids:
-        if i != removed:
-            result.append(i)
-    return result
-
-
-@app.callback(
     Output("price-chart", "figure"),
     Input("stock-select", "value"),
     Input("date-range", "start_date"),
@@ -291,13 +191,8 @@ def price_chart(ids, start, end, mode):
             fig.add_trace(trace)
         fig.update_yaxes(type="log")
 
-    if mode == "line":
-        title = "Cours des actions (échelle log)"
-    else:
-        title = "Cours des actions"
-
     fig.update_layout(
-        title=title,
+        title="Cours des actions",
         xaxis_rangeslider_visible=False,
         xaxis_rangebreaks=[dict(bounds=["sat", "mon"])],
         dragmode="pan",
@@ -307,34 +202,16 @@ def price_chart(ids, start, end, mode):
 
 
 @app.callback(
-    Output("bollinger-stock", "options"),
-    Output("bollinger-stock", "value"),
-    Input("stock-select", "value"),
-)
-def bollinger_options(ids):
-    if not ids:
-        return [], None
-
-    id_list = []
-    for i in ids:
-        id_list.append(str(i))
-    id_str = ",".join(id_list)
-
-    df = db.df_query(f"SELECT id, name FROM companies WHERE id IN ({id_str})")
-    opts = []
-    for n, i in zip(df["name"], df["id"]):
-        opts.append({"label": n, "value": i})
-    return opts, ids[0]
-
-
-@app.callback(
     Output("bollinger-chart", "figure"),
-    Input("bollinger-stock", "value"),
+    Input("stock-select", "value"),
     Input("date-range", "start_date"),
     Input("date-range", "end_date"),
     Input("chart-type", "value"),
 )
-def bollinger_chart(stock_id, start, end, mode):
+def bollinger_chart(ids, start, end, mode):
+    if not ids:
+        return go.Figure()
+    stock_id = ids[0]
     df = get_stocks([stock_id], start, end)
     if len(df) < 20:
         return go.Figure()
