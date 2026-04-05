@@ -192,9 +192,11 @@ def refresh_ui(_):
 @app.callback(
     Output("selected-tags", "children"),
     Input("stock-select", "value"),
+    Input("chart-type", "value"),
+    Input("tabs", "active_tab"),
     State("stock-select", "options"),
 )
-def show_tags(ids, opts):
+def show_tags(ids, mode, active_tab, opts):
     if not ids:
         return []
 
@@ -206,13 +208,19 @@ def show_tags(ids, opts):
         lab = o["label"]
         labels[val] = lab
 
+    single_only = (mode == "candle" or active_tab == "tab-bollinger")
+
     tags = []
-    for i in ids:
+    for idx, i in enumerate(ids):
         name = labels.get(i, str(i))
+        if single_only and idx > 0:
+            color = "secondary"
+        else:
+            color = "primary"
         badge = dbc.Badge(
             [name, html.Span(" ×", className="ms-1")],
             id={"type": "remove-stock", "index": i},
-            color="primary", n_clicks=0,
+            color=color, n_clicks=0,
             style={"cursor": "pointer", "fontSize": "12px", "padding": "5px 10px"},
         )
         tags.append(badge)
