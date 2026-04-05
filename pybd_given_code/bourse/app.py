@@ -242,7 +242,8 @@ def bollinger_options(ids):
     if not ids:
         return [], None
     df = db.df_query(f"SELECT id, name FROM companies WHERE id IN ({','.join(str(i) for i in ids)})")
-    return [{"label": r["name"], "value": r["id"]} for _, r in df.iterrows()], ids[0]
+    opts = list(zip(df["name"], df["id"]))
+    return [{"label": n, "value": i} for n, i in opts], ids[0]
 
 
 @app.callback(
@@ -401,7 +402,6 @@ if __name__ == "__main__":
     logging.getLogger("sqlalchemy").setLevel(logging.ERROR)
     logging.getLogger("werkzeug").setLevel(logging.ERROR)
 
-    print("Chargement Euronext...")
     store_files("2020-05-01", "2024-12-31", "euronext", db)
 
     app.layout = build_layout()
@@ -411,5 +411,5 @@ if __name__ == "__main__":
         daemon=True
     ).start()
 
-    print("Dashboard disponible sur http://0.0.0.0:8050/")
+    print("Dashboard disponible sur http://localhost:8050/")
     app.run(host="0.0.0.0", debug=False, port=8050)
