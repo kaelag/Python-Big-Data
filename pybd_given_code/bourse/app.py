@@ -7,19 +7,21 @@ import dash_bootstrap_components as dbc
 import pandas as pd
 import plotly.graph_objects as go
 from loguru import logger
-from dash import Input, Output, dash_table, dcc, html
-
-logger.remove()
+import json
+from dash import ALL, Input, Output, State, dash_table, dcc, html
 
 import timescaledb_model as tsdb
 from etl import store_files
 
+logger.remove()
+
 DB_HOST = os.environ.get("DB_HOST", "database")
 db = tsdb.TimescaleStockMarketModel("bourse", "bourse", DB_HOST, "password")
 
-app = dash.Dash(__name__, external_stylesheets=[dbc.themes.FLATLY])
+app = dash.Dash(__name__, external_stylesheets=[dbc.themes.FLATLY], suppress_callback_exceptions=True)
 
 bourso_status = {"total": 0, "done": 0, "finished": False}
+
 
 
 def get_options():
@@ -80,10 +82,8 @@ def build_layout():
         dbc.Row([
             dbc.Col([
                 html.Label("Actions", className="small fw-semibold text-uppercase text-muted mb-1"),
-                dcc.Dropdown(id="stock-select", 
-                             options=opts, 
-                             multi=True, 
-                             placeholder="Rechercher des actions..."),
+                dcc.Dropdown(id="stock-select", options=opts, multi=True, placeholder="Rechercher des actions..."),
+                html.Div(id="selected-tags", className="mt-2 d-flex flex-wrap gap-1"),
             ], md=6),
             dbc.Col([
                 html.Label("Période", className="small fw-semibold text-uppercase text-muted mb-1"),
@@ -136,6 +136,59 @@ def build_layout():
         dcc.Interval(id="refresh-interval", interval=2000, n_intervals=0),
 
     ], fluid=True, className="px-4")
+
+
+@app.callback(
+    Output("selected-tags", "children"),
+    Input("stock-select", "value"),
+    Input("stock-select", "options"),
+    Input("chart-type", "value"),
+    Input("tabs", "active_tab"),
+)
+def show_tags(ids, opts, mode, active_tab):
+    if not ids or not opts:
+        return []
+    labels = {}
+    for o in opts:
+        labels[o["value"]] = o["label"]
+    single_only = (mode == "candle" or active_tab == "tab-bollinger")
+    tags = []
+    for idx, i in enumerate(ids):
+        name = labels.get(i, str(i))
+        if single_only and idx > 0:
+            color = "secondary"
+        else:
+            color = "primary"
+        badge = dbc.Badge(
+            [name, " ×"],
+            id={"type": "remove-stock", "index": i},
+            color=color, n_clicks=0, className="me-1",
+            style={"cursor": "pointer", "fontSize": "12px", "padding": "5px 10px"},
+        )
+        tags.append(badge)
+    return tags
+
+
+@app.callback(
+    Output("stock-select", "value"),
+    Input({"type": "remove-stock", "index": ALL}, "n_clicks"),
+    State("stock-select", "value"),
+    prevent_initial_call=True,
+)
+def remove_stock(clicks, ids):
+    if not ids:
+        raise dash.exceptions.PreventUpdate
+    triggered = dash.ctx.triggered[0]
+    if not triggered["value"]:
+        raise dash.exceptions.PreventUpdate
+    prop = triggered["prop_id"]
+    prop = prop.rsplit(".", 1)[0]
+    removed = json.loads(prop)["index"]
+    result = []
+    for i in ids:
+        if i != removed:
+            result.append(i)
+    return result
 
 
 @app.callback(
