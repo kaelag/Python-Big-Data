@@ -32,13 +32,23 @@ def get_options():
         JOIN daystocks d ON d.cid = c.id
         ORDER BY c.name
     """)
-    return [{"label": r["name"], "value": r["id"]} for _, r in df.iterrows()]
+    names = df["name"]
+    ids = df["id"]
+    options = []
+    for n, i in zip(names, ids):
+        options.append({"label": n, "value": i})
+    return options
 
 
 def get_stocks(stock_ids, start, end):
-    if not stock_ids or not start or not end:
+    if not stock_ids:
         return pd.DataFrame()
-    ids = ",".join(str(i) for i in stock_ids)
+    if not start or not end:
+        return pd.DataFrame()
+    id_list = []
+    for i in stock_ids:
+        id_list.append(str(i))
+    ids = ",".join(id_list)
     return db.df_query(f"""
         SELECT DISTINCT ON (d.date, d.cid)
                d.date, d.open, d.close, d.high, d.low,
@@ -157,14 +167,22 @@ def build_layout():
 )
 def refresh_ui(_):
     opts = get_options()
+
     if bourso_status["finished"]:
         total = bourso_status["total"]
-        msg = f"Boursorama chargé — {total:,} fichiers (100%)" if total > 0 else "Boursorama chargé"
+        if total > 0:
+            msg = f"Boursorama chargé — {total:,} fichiers (100%)"
+        else:
+            msg = "Boursorama chargé"
         return opts, msg, 100, {"display": "none"}
+
     elif bourso_status["total"] > 0:
-        pct = int(bourso_status["done"] / bourso_status["total"] * 100)
-        msg = f"Chargement Boursorama : {bourso_status['done']:,} / {bourso_status['total']:,} ({pct}%)"
+        done = bourso_status["done"]
+        total = bourso_status["total"]
+        pct = int(done / total * 100)
+        msg = f"Chargement Boursorama : {done:,} / {total:,} ({pct}%)"
         return opts, msg, pct, {}
+
     return opts, "Chargement Boursorama...", 0, {}
 
 
@@ -176,16 +194,26 @@ def refresh_ui(_):
 def show_tags(ids, opts):
     if not ids:
         return []
-    labels = {o["value"]: o["label"] for o in (opts or [])}
-    return [
-        dbc.Badge(
-            [labels.get(i, str(i)), html.Span(" ×", className="ms-1")],
+
+    labels = {}
+    if opts is None:
+        opts = []
+    for o in opts:
+        val = o["value"]
+        lab = o["label"]
+        labels[val] = lab
+
+    tags = []
+    for i in ids:
+        name = labels.get(i, str(i))
+        badge = dbc.Badge(
+            [name, html.Span(" ×", className="ms-1")],
             id={"type": "remove-stock", "index": i},
             color="primary", n_clicks=0,
             style={"cursor": "pointer", "fontSize": "12px", "padding": "5px 10px"},
         )
-        for i in ids
-    ]
+        tags.append(badge)
+    return tags
 
 
 @app.callback(
@@ -196,10 +224,22 @@ def show_tags(ids, opts):
 )
 def remove_stock(_, ids):
     ctx = dash.callback_context
-    if not ctx.triggered or not ids or not ctx.triggered[0]["value"]:
+    if not ctx.triggered:
         raise dash.exceptions.PreventUpdate
-    removed = json.loads(ctx.triggered[0]["prop_id"].rsplit(".", 1)[0])["index"]
-    return [i for i in ids if i != removed]
+    if not ids:
+        raise dash.exceptions.PreventUpdate
+    if not ctx.triggered[0]["value"]:
+        raise dash.exceptions.PreventUpdate
+
+    triggered = ctx.triggered[0]["prop_id"]
+    prop_id = triggered.rsplit(".", 1)[0]
+    removed = json.loads(prop_id)["index"]
+
+    result = []
+    for i in ids:
+        if i != removed:
+            result.append(i)
+    return result
 
 
 @app.callback(
@@ -215,20 +255,42 @@ def price_chart(ids, start, end, mode):
         return go.Figure()
 
     fig = go.Figure()
+
     if mode == "candle":
-        g = df[df["name"] == df["name"].iloc[0]].sort_values("date")
-        fig.add_trace(go.Candlestick(x=g["date"], open=g["open"], high=g["high"],
-                                      low=g["low"], close=g["close"], name=g["name"].iloc[0]))
+        first_name = df["name"].iloc[0]
+        g = df[df["name"] == first_name]
+        g = g.sort_values("date")
+        trace = go.Candlestick(
+            x=g["date"],
+            open=g["open"],
+            high=g["high"],
+            low=g["low"],
+            close=g["close"],
+            name=first_name,
+        )
+        fig.add_trace(trace)
     else:
         for name, g in df.groupby("name"):
-            fig.add_trace(go.Scatter(x=g["date"], y=g["close"], mode="lines", name=name))
+            trace = go.Scatter(
+                x=g["date"],
+                y=g["close"],
+                mode="lines",
+                name=name,
+            )
+            fig.add_trace(trace)
         fig.update_yaxes(type="log")
 
+    if mode == "line":
+        title = "Cours des actions (échelle log)"
+    else:
+        title = "Cours des actions"
+
     fig.update_layout(
-        title="Cours des actions" + (" (échelle log)" if mode == "line" else ""),
+        title=title,
         xaxis_rangeslider_visible=False,
         xaxis_rangebreaks=[dict(bounds=["sat", "mon"])],
-        dragmode="pan", margin=dict(l=50, r=30, t=50, b=40),
+        dragmode="pan",
+        margin=dict(l=50, r=30, t=50, b=40),
     )
     return fig
 
@@ -241,9 +303,17 @@ def price_chart(ids, start, end, mode):
 def bollinger_options(ids):
     if not ids:
         return [], None
-    df = db.df_query(f"SELECT id, name FROM companies WHERE id IN ({','.join(str(i) for i in ids)})")
-    opts = list(zip(df["name"], df["id"]))
-    return [{"label": n, "value": i} for n, i in opts], ids[0]
+
+    id_list = []
+    for i in ids:
+        id_list.append(str(i))
+    id_str = ",".join(id_list)
+
+    df = db.df_query(f"SELECT id, name FROM companies WHERE id IN ({id_str})")
+    opts = []
+    for n, i in zip(df["name"], df["id"]):
+        opts.append({"label": n, "value": i})
+    return opts, ids[0]
 
 
 @app.callback(
@@ -260,31 +330,59 @@ def bollinger_chart(stock_id, start, end, mode):
 
     df = df.sort_values("date")
     df["sma"] = df["close"].rolling(20).mean()
-    df["upper"] = df["sma"] + 2 * df["close"].rolling(20).std()
-    df["lower"] = df["sma"] - 2 * df["close"].rolling(20).std()
+    std20 = df["close"].rolling(20).std()
+    df["upper"] = df["sma"] + 2 * std20
+    df["lower"] = df["sma"] - 2 * std20
 
     name = df["name"].iloc[0]
     fig = go.Figure()
-    fig.add_trace(go.Scatter(x=df["date"], y=df["upper"], name="Bande sup",
-                             line=dict(color="rgba(150,150,150,0.3)")))
-    fig.add_trace(go.Scatter(x=df["date"], y=df["lower"], name="Bande inf",
-                             line=dict(color="rgba(150,150,150,0.3)"),
-                             fill="tonexty", fillcolor="rgba(200,200,200,0.2)"))
-    fig.add_trace(go.Scatter(x=df["date"], y=df["sma"], name="SMA 20",
-                             line=dict(dash="dash", color="orange")))
+
+    band_sup = go.Scatter(
+        x=df["date"], y=df["upper"],
+        name="Bande sup",
+        line=dict(color="rgba(150,150,150,0.3)"),
+    )
+    band_inf = go.Scatter(
+        x=df["date"], y=df["lower"],
+        name="Bande inf",
+        line=dict(color="rgba(150,150,150,0.3)"),
+        fill="tonexty",
+        fillcolor="rgba(200,200,200,0.2)",
+    )
+    sma_line = go.Scatter(
+        x=df["date"], y=df["sma"],
+        name="SMA 20",
+        line=dict(dash="dash", color="orange"),
+    )
+
+    fig.add_trace(band_sup)
+    fig.add_trace(band_inf)
+    fig.add_trace(sma_line)
 
     if mode == "candle":
-        fig.add_trace(go.Candlestick(x=df["date"], open=df["open"], high=df["high"],
-                                      low=df["low"], close=df["close"], name=name))
+        trace = go.Candlestick(
+            x=df["date"],
+            open=df["open"],
+            high=df["high"],
+            low=df["low"],
+            close=df["close"],
+            name=name,
+        )
+        fig.add_trace(trace)
     else:
-        fig.add_trace(go.Scatter(x=df["date"], y=df["close"], name=name,
-                                  line=dict(color="#2c7be5")))
+        trace = go.Scatter(
+            x=df["date"], y=df["close"],
+            name=name,
+            line=dict(color="#2c7be5"),
+        )
+        fig.add_trace(trace)
 
     fig.update_layout(
         title=f"Bandes de Bollinger — {name}",
         xaxis_rangeslider_visible=False,
         xaxis_rangebreaks=[dict(bounds=["sat", "mon"])],
-        dragmode="pan", margin=dict(l=50, r=30, t=50, b=40),
+        dragmode="pan",
+        margin=dict(l=50, r=30, t=50, b=40),
     )
     return fig
 
@@ -301,16 +399,30 @@ def data_table(ids, start, end):
     if df.empty:
         return [], []
 
-    df["date"] = pd.to_datetime(df["date"]).dt.strftime("%Y-%m-%d")
-    table = df.rename(columns={
-        "date": "Date", "name": "Action", "low": "Min", "high": "Max",
-        "open": "Début", "close": "Fin", "mean": "Moyenne", "std": "Écart-type",
-    })[["Date", "Action", "Min", "Max", "Début", "Fin", "Moyenne", "Écart-type"]]
+    dates = pd.to_datetime(df["date"])
+    df["date"] = dates.dt.strftime("%Y-%m-%d")
+
+    rename_map = {
+        "date": "Date",
+        "name": "Action",
+        "low": "Min",
+        "high": "Max",
+        "open": "Début",
+        "close": "Fin",
+        "mean": "Moyenne",
+        "std": "Écart-type",
+    }
+    table = df.rename(columns=rename_map)
+    colonnes = ["Date", "Action", "Min", "Max", "Début", "Fin", "Moyenne", "Écart-type"]
+    table = table[colonnes]
 
     for col in ("Min", "Max", "Début", "Fin", "Moyenne", "Écart-type"):
         table[col] = table[col].round(2)
 
-    return table.to_dict("records"), [{"name": c, "id": c} for c in table.columns]
+    columns = []
+    for c in table.columns:
+        columns.append({"name": c, "id": c})
+    return table.to_dict("records"), columns
 
 
 @app.callback(
@@ -321,19 +433,38 @@ def data_table(ids, start, end):
 )
 def corr_chart(ids, start, end):
     df = get_stocks(ids, start, end)
-    if df.empty or len(df["name"].unique()) < 2:
+    if df.empty:
+        return go.Figure()
+
+    noms = df["name"].unique()
+    if len(noms) < 2:
         return go.Figure()
 
     pivot = df.pivot_table(index="date", columns="name", values="close")
-    corr = pivot.corr().round(2)
+    corr = pivot.corr()
+    corr = corr.round(2)
 
-    fig = go.Figure(go.Heatmap(
-        z=corr.values, x=corr.columns.tolist(), y=corr.index.tolist(),
-        colorscale="RdBu", zmin=-1, zmax=1,
-        text=corr.values, texttemplate="%{text:.2f}",
+    noms_colonnes = corr.columns.tolist()
+    noms_lignes = corr.index.tolist()
+    valeurs = corr.values
+
+    trace = go.Heatmap(
+        z=valeurs,
+        x=noms_colonnes,
+        y=noms_lignes,
+        colorscale="RdBu",
+        zmin=-1,
+        zmax=1,
+        text=valeurs,
+        texttemplate="%{text:.2f}",
         colorbar=dict(title="Corrélation"),
-    ))
-    fig.update_layout(title="Matrice de corrélation", margin=dict(l=50, r=30, t=50, b=40))
+    )
+
+    fig = go.Figure(data=[trace])
+    fig.update_layout(
+        title="Matrice de corrélation",
+        margin=dict(l=50, r=30, t=50, b=40),
+    )
     return fig
 
 
@@ -352,24 +483,42 @@ def stats_table(ids, start, end):
     rows = []
     for name, g in df.groupby("name"):
         g = g.sort_values("date")
-        ret = g["close"].pct_change().dropna()
+
+        ret = g["close"].pct_change()
+        ret = ret.dropna()
         if ret.empty:
             continue
-        total = (g["close"].iloc[-1] / g["close"].iloc[0] - 1) * 100
-        vol = ret.std() * (252 ** 0.5) * 100
-        dd = ((g["close"] - g["close"].cummax()) / g["close"].cummax()).min() * 100
+
+        prix_debut = g["close"].iloc[0]
+        prix_fin = g["close"].iloc[-1]
+        rendement = (prix_fin / prix_debut - 1) * 100
+
+        ecart_type = ret.std()
+        volatilite = ecart_type * (252 ** 0.5) * 100
+
+        cummax = g["close"].cummax()
+        drawdown = (g["close"] - cummax) / cummax
+        drawdown_max = drawdown.min() * 100
+
+        meilleur = ret.max() * 100
+        pire = ret.min() * 100
+
         rows.append({
             "Action": name,
-            "Rendement (%)": round(total, 2),
-            "Volatilité annualisée (%)": round(vol, 2),
-            "Drawdown max (%)": round(dd, 2),
-            "Meilleur jour (%)": round(ret.max() * 100, 2),
-            "Pire jour (%)": round(ret.min() * 100, 2),
+            "Rendement (%)": round(rendement, 2),
+            "Volatilité annualisée (%)": round(volatilite, 2),
+            "Drawdown max (%)": round(drawdown_max, 2),
+            "Meilleur jour (%)": round(meilleur, 2),
+            "Pire jour (%)": round(pire, 2),
         })
 
     if not rows:
         return [], []
-    return rows, [{"name": c, "id": c} for c in rows[0].keys()]
+
+    columns = []
+    for c in rows[0].keys():
+        columns.append({"name": c, "id": c})
+    return rows, columns
 
 
 @app.callback(
@@ -385,16 +534,26 @@ def returns_chart(ids, start, end):
 
     fig = go.Figure()
     for name, g in df.groupby("name"):
-        ret = g.sort_values("date")["close"].pct_change().dropna() * 100
-        fig.add_trace(go.Histogram(x=ret, name=name, opacity=0.7, nbinsx=60))
+        g = g.sort_values("date")
+        ret = g["close"].pct_change()
+        ret = ret.dropna() * 100
+
+        trace = go.Histogram(x=ret, name=name, opacity=0.7, nbinsx=60)
+        fig.add_trace(trace)
 
     fig.update_layout(
         barmode="overlay",
         title="Distribution des rendements journaliers (%)",
-        xaxis_title="Rendement (%)", yaxis_title="Fréquence",
-        dragmode="pan", margin=dict(l=50, r=30, t=50, b=40),
+        xaxis_title="Rendement (%)",
+        yaxis_title="Fréquence",
+        dragmode="pan",
+        margin=dict(l=50, r=30, t=50, b=40),
     )
     return fig
+
+
+def load_bourso():
+    store_files("2019-01-01", "2023-12-31", "bourso", db, status=bourso_status)
 
 
 if __name__ == "__main__":
@@ -406,10 +565,7 @@ if __name__ == "__main__":
 
     app.layout = build_layout()
 
-    threading.Thread(
-        target=lambda: store_files("2019-01-01", "2023-12-31", "bourso", db, status=bourso_status),
-        daemon=True
-    ).start()
+    threading.Thread(target=load_bourso, daemon=True).start()
 
     print("Dashboard disponible sur http://localhost:8050/")
     app.run(host="0.0.0.0", debug=False, port=8050)
