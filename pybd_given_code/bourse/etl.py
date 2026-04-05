@@ -1,7 +1,6 @@
 import os
 import bz2
 import pickle
-import numpy as np
 import pandas as pd
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
@@ -121,12 +120,12 @@ def read_bourso_file(args):
 
     day = dt.strftime("%Y-%m-%d")
     name_vals = df.loc[mask, "name"].values
-    price_vals = prices[mask].values.astype(np.float32)
+    price_vals = prices[mask].values
 
     raw_vol = df.loc[mask, "volume"]
     vol_vals = pd.to_numeric(raw_vol, errors="coerce")
     vol_vals = vol_vals.fillna(0)
-    vol_vals = vol_vals.values.astype(np.float32)
+    vol_vals = vol_vals.values
 
     fname = os.path.basename(path)
     return (day, name_vals, price_vals, vol_vals), fname
