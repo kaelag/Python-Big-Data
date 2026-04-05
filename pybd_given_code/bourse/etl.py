@@ -220,18 +220,16 @@ def store_bourso(start, end, db, status=None):
         fnames = []
 
         with ThreadPoolExecutor(max_workers=workers) as pool:
-            results = list(pool.map(read_bourso_file, batch))
-
-        for idx, (result, fname) in enumerate(results):
-            if result is not None:
-                day, n, p, v = result
-                days.extend([day] * len(n))
-                names.extend(n)
-                prices.extend(p)
-                volumes.extend(v)
-                fnames.append(fname)
-            if status:
-                status["done"] = processed + idx + 1
+            for idx, (result, fname) in enumerate(pool.map(read_bourso_file, batch)):
+                if result is not None:
+                    day, n, p, v = result
+                    days.extend([day] * len(n))
+                    names.extend(n)
+                    prices.extend(p)
+                    volumes.extend(v)
+                    fnames.append(fname)
+                if status:
+                    status["done"] = processed + idx + 1
 
         df = pd.DataFrame()
         df["day"] = days
