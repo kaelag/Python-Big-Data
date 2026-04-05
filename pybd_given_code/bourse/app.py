@@ -69,23 +69,36 @@ def build_layout():
 
         html.Div(id="loading-section", children=[
             html.Small(id="bourso-status", className="text-muted d-block mb-1"),
-            dbc.Progress(id="bourso-progress", value=0, striped=True, animated=True, color="primary", style={"height": "5px"}),
+            dbc.Progress(id="bourso-progress", 
+                         value=0, 
+                         striped=True,
+                         animated=True,
+                         color="primary", 
+                         style={"height": "5px"}),
         ], className="mb-4"),
 
         dbc.Row([
             dbc.Col([
                 html.Label("Actions", className="small fw-semibold text-uppercase text-muted mb-1"),
-                dcc.Dropdown(id="stock-select", options=opts, multi=True, placeholder="Rechercher des actions..."),
+                dcc.Dropdown(id="stock-select", 
+                             options=opts, 
+                             multi=True, 
+                             placeholder="Rechercher des actions..."),
             ], md=6),
             dbc.Col([
                 html.Label("Période", className="small fw-semibold text-uppercase text-muted mb-1"),
-                dcc.DatePickerRange(id="date-range", start_date="2020-05-01", end_date="2020-12-31", display_format="YYYY-MM-DD"),
+                dcc.DatePickerRange(id="date-range", 
+                                    start_date="2020-05-01",
+                                    end_date="2020-12-31", 
+                                    display_format="YYYY-MM-DD"),
             ], md=4),
             dbc.Col([
                 html.Label("Affichage", className="small fw-semibold text-uppercase text-muted mb-1"),
                 dcc.RadioItems(id="chart-type",
                     options=[{"label": " Ligne", "value": "line"}, {"label": " Chandeliers", "value": "candle"}],
-                    value="line", inline=True, inputStyle={"marginRight": "4px", "marginLeft": "10px"}),
+                    value="line", 
+                    inline=True, 
+                    inputStyle={"marginRight": "4px", "marginLeft": "10px"}),
             ], md=2, className="d-flex flex-column justify-content-end"),
         ], className="mb-4 g-3"),
 
