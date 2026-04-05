@@ -1,56 +1,51 @@
 import os
-import time
+import bz2
+import pickle
 import numpy as np
 import pandas as pd
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
-from loguru import logger
 
 import timescaledb_model as tsdb
 
-TSDB = tsdb.TimescaleStockMarketModel
 DATADIR = os.environ.get("DATADIR", "/mnt/data/")
-EURONEXT_DIR = os.path.join(DATADIR, "euronext")
-BOURSO_DIR = os.path.join(DATADIR, "boursorama")
+EURONEXT = os.path.join(DATADIR, "euronext")
+BOURSO = os.path.join(DATADIR, "boursorama")
 
 
-def _clean_numeric(series):
+def clean_num(s):
     return pd.to_numeric(
-        series.astype(str)
-        .str.replace(" ", "", regex=False)
-        .str.replace(",", "", regex=False)
-        .str.replace("(c)", "", regex=False),
-        errors="coerce",
+        s.astype(str).str.replace(r"[ ,(c)]", "", regex=True),
+        errors="coerce"
     )
 
 
-def _read_euronext_file(filepath):
-    if filepath.endswith(".csv"):
-        df = pd.read_csv(filepath, sep="\t", skiprows=[1, 2, 3])
+def read_euronext(path):
+    if path.endswith(".csv"):
+        df = pd.read_csv(path, sep="\t", skiprows=[1, 2, 3])
     else:
-        df = pd.read_excel(filepath, skiprows=[1, 2, 3])
+        df = pd.read_excel(path, skiprows=[1, 2, 3])
 
-    rename = {
+    df.rename(columns={
         "Open Price": "Open", "High Price": "High",
         "low Price": "Low", "last Price": "Last",
         "Currency": "Trading Currency",
         "last Trade MIC Time": "Last Date/Time",
-    }
-    df.rename(columns={k: v for k, v in rename.items() if k in df.columns}, inplace=True)
+    }, inplace=True)
 
-    for col in ("Open", "High", "Low", "Last", "Volume", "Turnover"):
+    for col in ("Open", "High", "Low", "Last", "Volume"):
         if col in df.columns:
-            df[col] = _clean_numeric(df[col])
+            df[col] = clean_num(df[col])
 
     df["Volume"] = df["Volume"].fillna(0)
     return df.dropna(subset=["Open", "High", "Low", "Last"])
 
 
-def _list_euronext_files(start, end):
+def list_euronext(start, end):
     s = datetime.strptime(start, "%Y-%m-%d")
     e = datetime.strptime(end, "%Y-%m-%d")
-    result = []
-    for f in os.listdir(EURONEXT_DIR):
+    files = []
+    for f in os.listdir(EURONEXT):
         if not (f.endswith(".csv") or f.endswith(".xlsx")):
             continue
         try:
@@ -58,21 +53,16 @@ def _list_euronext_files(start, end):
         except ValueError:
             continue
         if s <= dt <= e:
-            result.append((dt, os.path.join(EURONEXT_DIR, f)))
-    result.sort()
-    return result
+            files.append((dt, os.path.join(EURONEXT, f)))
+    return sorted(files)
 
 
-_bourso_cache = None
-
-
-def _get_bourso_all():
-    global _bourso_cache
-    if _bourso_cache is not None:
-        return _bourso_cache
+def list_bourso(start, end):
+    s = datetime.strptime(start, "%Y-%m-%d")
+    e = datetime.strptime(end, "%Y-%m-%d")
     files = []
-    for year in os.listdir(BOURSO_DIR):
-        year_path = os.path.join(BOURSO_DIR, year)
+    for year in os.listdir(BOURSO):
+        year_path = os.path.join(BOURSO, year)
         if not os.path.isdir(year_path):
             continue
         for fname in os.listdir(year_path):
@@ -82,172 +72,64 @@ def _get_bourso_all():
                 dt = datetime.strptime(fname[6:-4], "%Y-%m-%d %H:%M:%S.%f")
             except ValueError:
                 continue
-            files.append((dt, os.path.join(year_path, fname)))
-    files.sort()
-    _bourso_cache = files
-    return files
+            if s <= dt <= e:
+                files.append((dt, os.path.join(year_path, fname)))
+    return sorted(files)
 
 
-def _list_bourso_files(start, end):
-    s = datetime.strptime(start, "%Y-%m-%d")
-    e = datetime.strptime(end, "%Y-%m-%d")
-    return [(dt, p) for dt, p in _get_bourso_all() if s <= dt <= e]
-
-
-def _get_or_refresh_cid_map(db, new_names=None, cid_map=None):
+def get_cid_map(db, new_names=None):
     if new_names:
-        new_rows = [{"name": n, "mid": 6, "symbol": "", "isin": "", "euronext": ""} for n in new_names]
-        db.df_write(pd.DataFrame(new_rows), "companies")
+        rows = pd.DataFrame([{"name": n, "mid": 6, "symbol": "", "isin": "", "euronext": ""} for n in new_names])
+        db.df_write(rows, "companies")
         db.commit()
-    existing = db.df_query("SELECT id, name FROM companies")
-    return dict(zip(existing["name"], existing["id"])) if len(existing) else {}
+    df = db.df_query("SELECT id, name FROM companies")
+    return dict(zip(df["name"], df["id"])) if len(df) else {}
 
 
-def preload_bourso_companies(db: TSDB):
-    cid_map = _get_or_refresh_cid_map(db)
-    all_names = set()
-    for year in os.listdir(BOURSO_DIR):
-        year_path = os.path.join(BOURSO_DIR, year)
-        if not os.path.isdir(year_path):
-            continue
-        files = [f for f in os.listdir(year_path) if f.endswith(".bz2")]
-        for f in files[:2]:
-            try:
-                df = pd.read_pickle(os.path.join(year_path, f), compression="bz2")
-                all_names.update(df["name"].unique())
-            except Exception:
-                continue
-
-    new_names = all_names - set(cid_map.keys())
-    if new_names:
-        _get_or_refresh_cid_map(db, new_names)
-        logger.info(f"Bourso: {len(new_names)} nouvelles actions enregistrees")
-    else:
-        logger.info("Bourso: toutes les actions deja connues")
-
-
-def _read_bourso_for_stock(args):
-    dt, path, stock_name = args
+def read_bourso_file(args):
+    dt, path = args
     try:
-        import bz2, pickle
         with bz2.open(path, "rb") as f:
             df = pickle.load(f)
     except Exception:
-        return None
-    hit = df[df["name"] == stock_name]
-    if hit.empty:
-        return None
-    raw = str(hit["last"].iloc[0]).replace(" ", "").replace(",", "").replace("(c)", "")
-    try:
-        price = float(raw)
-    except (ValueError, TypeError):
-        return None
-    try:
-        vol = float(hit["volume"].iloc[0])
-    except (ValueError, TypeError):
-        vol = 0.0
-    return (dt.strftime("%Y-%m-%d"), price, vol)
+        return None, None
+
+    prices = clean_num(df["last"])
+    mask = prices.notna()
+    if not mask.any():
+        return None, None
+
+    return (
+        dt.strftime("%Y-%m-%d"),
+        df.loc[mask, "name"].values,
+        prices[mask].values.astype(np.float32),
+        pd.to_numeric(df.loc[mask, "volume"], errors="coerce").fillna(0).values.astype(np.float32),
+    ), os.path.basename(path)
 
 
-def load_stock_priority(stock_name, start, end, db: TSDB):
-    files = _list_bourso_files(start, end)
-    if not files:
-        return
-
-    from collections import defaultdict
-    by_day = defaultdict(list)
-    for dt, path in files:
-        by_day[dt.strftime("%Y-%m-%d")].append((dt, path))
-
-    sampled = []
-    for day, df_list in by_day.items():
-        sampled.append(df_list[0])
-        if len(df_list) > 1:
-            sampled.append(df_list[-1])
-        if len(df_list) > 4:
-            sampled.append(df_list[len(df_list) // 2])
-
-    args = [(dt, p, stock_name) for dt, p in sampled]
-    workers = os.cpu_count() or 4
-    results = []
-
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        for r in pool.map(_read_bourso_for_stock, args):
-            if r is not None:
-                results.append(r)
-
-    if not results:
-        return
-
-    df = pd.DataFrame(results, columns=["day", "price", "volume"])
-    agg = df.groupby("day").agg(
-        open=("price", "first"),
-        close=("price", "last"),
-        high=("price", "max"),
-        low=("price", "min"),
-        volume=("volume", "max"),
-    ).reset_index()
-
-    cid_map = _get_or_refresh_cid_map(db)
-    cid = cid_map.get(stock_name)
-    if cid is None:
-        return
-
-    agg.rename(columns={"day": "date"}, inplace=True)
-    agg["cid"] = int(cid)
-    ohlc = agg[["open", "high", "low", "close"]]
-    agg["mean"] = ohlc.mean(axis=1).astype("float32")
-    agg["std"] = ohlc.std(axis=1).astype("float32")
-
-    result = agg[["date", "cid", "open", "close", "high", "low", "volume", "mean", "std"]].copy()
-    result["cid"] = result["cid"].astype("Int16")
-    for col in ("open", "close", "high", "low", "volume"):
-        result[col] = result[col].astype("float32")
-
-    db.df_write(result, "daystocks", chunksize=5000)
-    db.commit()
-    logger.info(f"Priority: {stock_name} - {len(result)} jours charges")
-
-
-def store_files(start: str, end: str, website: str, db: TSDB, status=None):
-    t0 = time.time()
-
-    if website == "euronext":
-        _store_euronext(start, end, db)
-    elif website == "bourso":
-        _store_bourso(start, end, db, status=status)
-    else:
-        raise ValueError(f"Source inconnue: {website}")
-
-    logger.info(f"store_files({website}) en {time.time() - t0:.1f}s")
-
-
-def _store_euronext(start, end, db):
-    files = _list_euronext_files(start, end)
-    logger.info(f"Euronext: {len(files)} fichiers")
-
+def store_euronext(start, end, db):
+    files = list_euronext(start, end)
     done = set(db.df_query("SELECT name FROM file_done")["name"])
-    cid_map = _get_or_refresh_cid_map(db)
+    cid_map = get_cid_map(db)
 
     todo = [(dt, p) for dt, p in files if os.path.basename(p) not in done]
     if not todo:
-        logger.info("Rien a charger")
         return
 
-    logger.info(f"{len(todo)} fichiers a charger")
-    all_frames = []
-    new_fnames = []
+    print(f"Euronext: {len(todo)} fichiers a charger")
+    frames = []
+    fnames = []
 
     for dt, path in todo:
-        df = _read_euronext_file(path)
+        df = read_euronext(path)
         if df.empty:
             continue
 
         new_names = set(df["Name"]) - set(cid_map.keys())
         if new_names:
-            cid_map = _get_or_refresh_cid_map(db, new_names)
+            cid_map = get_cid_map(db, new_names)
 
-        daystocks = pd.DataFrame({
+        day = pd.DataFrame({
             "date": dt,
             "cid": df["Name"].map(cid_map).astype("Int16"),
             "open": df["Open"].astype("float32"),
@@ -257,68 +139,35 @@ def _store_euronext(start, end, db):
             "volume": df["Volume"].astype("float32"),
         })
 
-        ohlc = daystocks[["open", "high", "low", "close"]]
-        daystocks["mean"] = ohlc.mean(axis=1).astype("float32")
-        daystocks["std"] = ohlc.std(axis=1).astype("float32")
+        ohlc = day[["open", "high", "low", "close"]]
+        day["mean"] = ohlc.mean(axis=1).astype("float32")
+        day["std"] = ohlc.std(axis=1).astype("float32")
 
-        all_frames.append(daystocks)
-        new_fnames.append(os.path.basename(path))
+        frames.append(day)
+        fnames.append(os.path.basename(path))
 
-    if all_frames:
-        big = pd.concat(all_frames, ignore_index=True)
-        db.df_write(big, "daystocks", chunksize=5000)
-        for fname in new_fnames:
-            db.raw_query(
-                "INSERT INTO file_done (name) VALUES (%s) ON CONFLICT DO NOTHING",
-                (fname,),
-            )
+    if frames:
+        db.df_write(pd.concat(frames, ignore_index=True), "daystocks", chunksize=5000)
+        for fname in fnames:
+            db.raw_query("INSERT INTO file_done (name) VALUES (%s) ON CONFLICT DO NOTHING", (fname,))
         db.commit()
-        logger.info(f"{len(big)} lignes inserees")
-
-    logger.info("Import euronext termine")
 
 
-def _read_one_bourso(args):
-    dt, path = args
-    try:
-        import bz2, pickle
-        with bz2.open(path, "rb") as f:
-            raw = pickle.load(f)
-    except Exception:
-        return None, None
-
-    prices = pd.to_numeric(
-        raw["last"].astype(str)
-        .str.replace(" ", "", regex=False)
-        .str.replace(",", "", regex=False)
-        .str.replace("(c)", "", regex=False),
-        errors="coerce",
-    )
-    mask = prices.notna()
-    if not mask.any():
-        return None, None
-
-    return (
-        dt.strftime("%Y-%m-%d"),
-        raw.loc[mask, "name"].values,
-        prices[mask].values.astype(np.float32),
-        pd.to_numeric(raw.loc[mask, "volume"], errors="coerce").fillna(0).values.astype(np.float32),
-    ), os.path.basename(path)
-
-
-def _store_bourso(start, end, db, status=None):
-    files = _list_bourso_files(start, end)
+def store_bourso(start, end, db, status=None):
+    files = list_bourso(start, end)
     done = set(db.df_query("SELECT name FROM file_done")["name"])
-    cid_map = _get_or_refresh_cid_map(db)
+    cid_map = get_cid_map(db)
 
     todo = [(dt, p) for dt, p in files if os.path.basename(p) not in done]
     if not todo:
-        if status is not None:
+        if status:
             status["finished"] = True
         return
 
     total = len(todo)
-    if status is not None:
+    print(f"Bourso: {total} fichiers a charger")
+
+    if status:
         status["total"] = total
         status["done"] = 0
 
@@ -328,45 +177,37 @@ def _store_bourso(start, end, db, status=None):
 
     for i in range(0, total, BATCH):
         batch = todo[i:i + BATCH]
-
         days, names, prices, volumes, fnames = [], [], [], [], []
 
         with ThreadPoolExecutor(max_workers=workers) as pool:
-            for idx, (result, fname) in enumerate(pool.map(_read_one_bourso, batch)):
+            for idx, (result, fname) in enumerate(pool.map(read_bourso_file, batch)):
                 if result is not None:
                     day, n, p, v = result
-                    k = len(n)
-                    days.extend([day] * k)
+                    days.extend([day] * len(n))
                     names.extend(n)
                     prices.extend(p)
                     volumes.extend(v)
                     fnames.append(fname)
-                if status is not None:
+                if status:
                     status["done"] = processed + idx + 1
 
         if not fnames:
             processed += len(batch)
-            if status is not None:
-                status["done"] = processed
             continue
 
-        big = pd.DataFrame({"day": days, "name": names, "last": prices, "volume": volumes})
-        del days, names, prices, volumes
+        df = pd.DataFrame({"day": days, "name": names, "last": prices, "volume": volumes})
 
-        agg = big.groupby(["day", "name"]).agg(
+        agg = df.groupby(["day", "name"]).agg(
             open=("last", "first"),
             close=("last", "last"),
             high=("last", "max"),
             low=("last", "min"),
             volume=("volume", "max"),
-        ).reset_index()
-        del big
-
-        agg.rename(columns={"day": "date"}, inplace=True)
+        ).reset_index().rename(columns={"day": "date"})
 
         new_names = set(agg["name"]) - set(cid_map.keys())
         if new_names:
-            cid_map = _get_or_refresh_cid_map(db, new_names)
+            cid_map = get_cid_map(db, new_names)
 
         agg["cid"] = agg["name"].map(cid_map)
         agg = agg.dropna(subset=["cid"])
@@ -374,22 +215,23 @@ def _store_bourso(start, end, db, status=None):
         ohlc = agg[["open", "high", "low", "close"]]
         agg["mean"] = ohlc.mean(axis=1).astype("float32")
         agg["std"] = ohlc.std(axis=1).astype("float32")
-
-        result = agg[["date", "cid", "open", "close", "high", "low", "volume", "mean", "std"]].copy()
-        result["cid"] = result["cid"].astype("Int16")
+        agg["cid"] = agg["cid"].astype("Int16")
         for col in ("open", "close", "high", "low", "volume"):
-            result[col] = result[col].astype("float32")
+            agg[col] = agg[col].astype("float32")
 
-        db.df_write(result, "daystocks", chunksize=10000)
+        db.df_write(agg[["date", "cid", "open", "close", "high", "low", "volume", "mean", "std"]], "daystocks", chunksize=10000)
         for fname in fnames:
-            db.raw_query(
-                "INSERT INTO file_done (name) VALUES (%s) ON CONFLICT DO NOTHING",
-                (fname,),
-            )
+            db.raw_query("INSERT INTO file_done (name) VALUES (%s) ON CONFLICT DO NOTHING", (fname,))
         db.commit()
 
         processed += len(batch)
 
-    if status is not None:
+    if status:
         status["finished"] = True
-    logger.info("Import bourso termine")
+
+
+def store_files(start, end, website, db, status=None):
+    if website == "euronext":
+        store_euronext(start, end, db)
+    elif website == "bourso":
+        store_bourso(start, end, db, status)
