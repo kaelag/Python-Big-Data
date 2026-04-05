@@ -39,8 +39,7 @@ def read_euronext(path):
     df.rename(columns=rename_map, inplace=True)
 
     for col in ("Open", "High", "Low", "Last", "Volume"):
-        if col in df.columns:
-            df[col] = clean_num(df[col])
+        df[col] = clean_num(df[col])
 
     df["Volume"] = df["Volume"].fillna(0)
     df = df.dropna(subset=["Open", "High", "Low", "Last"])
@@ -99,10 +98,8 @@ def get_cid_map(db, new_names=None):
             rows.append({"name": n, "mid": 6, "symbol": "", "isin": "", "euronext": ""})
         db.df_write(pd.DataFrame(rows), "companies")
         db.commit()
-        
+
     df = db.df_query("SELECT id, name FROM companies")
-    if len(df) == 0:
-        return {}
     names = df["name"]
     ids = df["id"]
     return dict(zip(names, ids))
@@ -110,6 +107,7 @@ def get_cid_map(db, new_names=None):
 
 def read_bourso_file(args):
     dt, path = args
+    
     try:
         with bz2.open(path, "rb") as f:
             df = pickle.load(f)
@@ -180,9 +178,9 @@ def store_euronext(start, end, db):
 
     if frames:
         all_data = pd.concat(frames, ignore_index=True)
-        db.df_write(all_data, "daystocks", chunksize=5000)
+        db.df_write(all_data, "daystocks", chunksize=10000)
         for fname in fnames:
-            db.raw_query("INSERT INTO file_done (name) VALUES (%s) ON CONFLICT DO NOTHING", (fname,))
+            db.raw_query("INSERT INTO file_done (name) VALUES (%s)", (fname,))
         db.commit()
 
 
@@ -233,10 +231,6 @@ def store_bourso(start, end, db, status=None):
             if status:
                 status["done"] = processed + idx + 1
 
-        if not fnames:
-            processed += len(batch)
-            continue
-
         df = pd.DataFrame()
         df["day"] = days
         df["name"] = names
@@ -260,7 +254,6 @@ def store_bourso(start, end, db, status=None):
             cid_map = get_cid_map(db, new_names)
 
         agg["cid"] = agg["name"].map(cid_map)
-        agg = agg.dropna(subset=["cid"])
 
         ohlc = agg[["open", "high", "low", "close"]]
         agg["mean"] = ohlc.mean(axis=1)
@@ -269,7 +262,7 @@ def store_bourso(start, end, db, status=None):
         cols = ["date", "cid", "open", "close", "high", "low", "volume", "mean", "std"]
         db.df_write(agg[cols], "daystocks", chunksize=10000)
         for fname in fnames:
-            db.raw_query("INSERT INTO file_done (name) VALUES (%s) ON CONFLICT DO NOTHING", (fname,))
+            db.raw_query("INSERT INTO file_done (name) VALUES (%s)", (fname,))
         db.commit()
 
         processed += len(batch)
