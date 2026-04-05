@@ -79,6 +79,7 @@ def list_bourso(start, end):
                 continue
 
             date_part = fname[6:-4]
+            date_part = date_part.replace("_", ":")
             dt = datetime.strptime(date_part, "%Y-%m-%d %H:%M:%S.%f")
 
             if s <= dt <= e:
